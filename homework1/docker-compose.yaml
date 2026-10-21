@@ -1,0 +1,118 @@
+x-kafka-env:
+  # Адрес ZooKeeper, через который Kafka хранит служебные данные кластера
+  # (какие брокеры живы, какие есть топики и т.д.).
+  &kafka-env
+  KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+  # Какой протокол безопасности у каждого «входа».
+  # PLAINTEXT = без шифрования и без логина/пароля. Нормально для локальной разработки,
+  # но не для продакшена.
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT
+
+  # Через какой «вход» брокеры общаются между собой.
+  # Брокеры живут внутри Docker, поэтому выбран INTERNAL.
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+  # Сколько копий хранить у служебного топика транзакций (__transaction_state).
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+
+  # Минимум «живых и синхронных» копий топика транзакций, при котором запись разрешена.
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+
+  # Сколько копий хранить у служебного топика __consumer_offsets
+  # (в нём записано, какое сообщение каждый потребитель прочитал последним).
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+
+  KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: 20
+
+  # Сколько копий по умолчанию получают топики, если при создании это не указано явно.
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+
+x-kafka-broker: &kafka-broker
+  image: confluentinc/cp-kafka:7.0.1
+  depends_on:
+    - zookeeper
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.0.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka-0:
+    <<: *kafka-broker
+    environment:
+      <<: *kafka-env
+      # Уникальный номер брокера (сервера Kafka) в кластере.
+      KAFKA_BROKER_ID: 1
+
+      # На каких адресах и портах Kafka РЕАЛЬНО слушает подключения внутри контейнера.
+      # 0.0.0.0 значит «принимать подключения на всех сетевых интерфейсах».
+      KAFKA_LISTENERS: EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:29092
+
+      # Какой адрес Kafka СООБЩАЕТ клиенту, чтобы тот подключался дальше.
+      # EXTERNAL → localhost:9092 — для программ на локальном компьютере (вне Docker).
+      # INTERNAL → kafka-0:29092  — для других контейнеров в той же docker-сети.
+      KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:9092,INTERNAL://kafka-0:29092
+    ports:
+      - "9092:9092"
+
+  kafka-1:
+    <<: *kafka-broker
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 2
+      KAFKA_LISTENERS: EXTERNAL://0.0.0.0:9096,INTERNAL://0.0.0.0:29096
+      KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:9096,INTERNAL://kafka-1:29096
+    ports:
+      - "9096:9096"
+
+  kafka-2:
+    <<: *kafka-broker
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 3
+      KAFKA_LISTENERS: EXTERNAL://0.0.0.0:9095,INTERNAL://0.0.0.0:29095
+      KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:9095,INTERNAL://kafka-2:29095
+    ports:
+      - "9095:9095"
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka-0
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-0:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.0.1
+    depends_on:
+      - kafka-0
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka-0:29092
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+
+  app:
+    build: .
+    depends_on:
+      - kafka-0
+      - kafka-1
+      - kafka-2
+      - schema-registry
+    environment:
+      # Внутренние адреса брокеров и Schema Registry (localhost из контейнера не подходит).
+      BOOTSTRAP_SERVERS: kafka-0:29092,kafka-1:29096,kafka-2:29095
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    deploy:
+      replicas: 2
